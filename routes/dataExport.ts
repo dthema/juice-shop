@@ -14,13 +14,17 @@ const security = require('../lib/insecurity')
 
 module.exports = function dataExport () {
   return async (req: Request, res: Response, next: NextFunction) => {
-    const loggedInUser = security.authenticatedUsers.get(req.headers?.authorization?.replace('Bearer ', ''))
+    const authHeader = req.headers?.authorization
+    const token = typeof authHeader === 'string' ? authHeader.replace('Bearer ', '') : ''
+    if (!token || !/^[\w-]+$/.test(token)) {
+      return next(new Error('Invalid or missing authorization token'))
+    }
+    const loggedInUser = security.authenticatedUsers.get(token)
     if (loggedInUser?.data?.email && loggedInUser.data.id) {
       const username = loggedInUser.data.username
       const email = loggedInUser.data.email
       const updatedEmail = email.replace(/[aeiou]/gi, '*')
-      const userData:
-      {
+      const userData: {
         username: string
         email: string
         orders: Array<{
@@ -41,8 +45,7 @@ module.exports = function dataExport () {
           imageUrl: string
           caption: string
         }>
-      } =
-      {
+      } = {
         username,
         email,
         orders: [],
@@ -50,7 +53,11 @@ module.exports = function dataExport () {
         memories: []
       }
 
-      const memories = await MemoryModel.findAll({ where: { UserId: req.body.UserId } })
+      const userId = parseInt(req.body.UserId, 10)
+      if (isNaN(userId)) {
+        return next(new Error('Invalid UserId provided'))
+      }
+      const memories = await MemoryModel.findAll({ where: { UserId: { $eq: Number(userId)} } })
       memories.forEach((memory: MemoryModel) => {
         userData.memories.push({
           imageUrl: req.protocol + '://' + req.get('host') + '/' + memory.imagePath,
@@ -58,7 +65,7 @@ module.exports = function dataExport () {
         })
       })
 
-      db.ordersCollection.find({ email: updatedEmail }).then((orders: Array<{
+      db.ordersCollection.find({ email: { $eq: String(email) } }).then((orders: Array<{
         orderId: string
         totalPrice: number
         products: ProductModel[]
@@ -77,7 +84,7 @@ module.exports = function dataExport () {
           })
         }
 
-        db.reviewsCollection.find({ author: email }).then((reviews: Array<{
+        db.reviewsCollection.find({ author: { $eq: String(email) } }).then((reviews: Array<{
           message: string
           author: string
           product: number
@@ -96,17 +103,15 @@ module.exports = function dataExport () {
             })
           }
           const emailHash = security.hash(email).slice(0, 4)
-          for (const order of userData.orders) {
-            challengeUtils.solveIf(challenges.dataExportChallenge, () => { return order.orderId.split('-')[0] !== emailHash })
-          }
+          userData.orders.forEach(order => {
+            challengeUtils.solveIf(challenges.dataExportChallenge, () => order.orderId.split('-')[0] !== emailHash)
+          })
           res.status(200).send({ userData: JSON.stringify(userData, null, 2), confirmation: 'Your data export will open in a new Browser window.' })
-        },
-        () => {
-          next(new Error(`Error retrieving reviews for ${updatedEmail}`))
+        }).catch(() => {
+          next(new Error(`Error retrieving reviews for ${email}`))
         })
-      },
-      () => {
-        next(new Error(`Error retrieving orders for ${updatedEmail}`))
+      }).catch(() => {
+        next(new Error(`Error retrieving orders for ${email}`))
       })
     } else {
       next(new Error('Blocked illegal activity by ' + req.socket.remoteAddress))
